@@ -1,9 +1,13 @@
 # quote0-monitor — Quote/0 墨水屏本地监控器
 
 ChatGPT(Codex) + GLM 用量 → 渲染 → 推送到 Quote/0 电子墨水屏的两张循环卡片。
-合并自 [quote0-burnout](../quote0-burnout)（ChatGPT 侧）与 [quote0-glm](../quote0-glm)
-（GLM 侧），渲染视觉与两项目一致。设计前提：**开机 = 在消耗额度 = 需要刷新**；
-关机无消耗，屏幕停留旧数据即为正确状态。
+合并自 [quote0-burnout](https://github.com/ajaxjiang96/quote0-burnout)（ChatGPT 侧）
+与 [quote0-glm](https://github.com/YuanTutu/quote0-glm)（GLM 侧），渲染视觉与两项目一致。
+设计前提：**开机 = 在消耗额度 = 需要刷新**；关机无消耗，屏幕停留旧数据即为正确状态。
+
+**下载使用**：到 [Releases](https://github.com/YuanTutu/quote0-monitor/releases)
+下载 `quote0-monitor.exe`（单文件，免装 Python），双击运行后在配置窗口填入
+自己的密钥即可——详见程序内「使用说明」。当前版本 v1.8.0。
 
 ## 运行
 

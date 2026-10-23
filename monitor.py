@@ -37,6 +37,8 @@ from pathlib import Path
 
 import requests
 
+__version__ = "1.8.0"
+
 # 打包成 exe（PyInstaller --onefile）后，__file__ 指向临时解压目录且每次
 # 变化——配置/日志/预览必须落在 exe 自己的目录；渲染器则从打包内部加载。
 _FROZEN = getattr(sys, "frozen", False)
@@ -595,7 +597,7 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
 
     SCALE = 1.2
     root = tk.Tk()
-    root.title("Quote/0 用量监控")
+    root.title(f"Quote/0 用量监控 v{__version__}")
     log_file = dash.tmp / "monitor.log"
 
     log_lines: list[str] = []
@@ -857,6 +859,7 @@ def acquire_lock() -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--version", action="version", version=f"quote0-monitor v{__version__}")
     ap.add_argument("--silent", action="store_true", help="无界面后台模式")
     ap.add_argument("--once", action="store_true", help="单次抓取推送后退出（自检）")
     ap.add_argument("--install-autostart", action="store_true", help="安装开机自启后退出")
