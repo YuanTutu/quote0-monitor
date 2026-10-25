@@ -32,12 +32,13 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 import requests
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 # 打包成 exe（PyInstaller --onefile）后，__file__ 指向临时解压目录且每次
 # 变化——配置/日志/预览必须落在 exe 自己的目录；渲染器则从打包内部加载。
@@ -209,13 +210,38 @@ class Dashboard:
         return {"ok": r.ok, "status": r.status_code,
                 "message": body.get("message", "") if isinstance(body, dict) else str(body)}
 
+    # 网络抖动重试：chatgpt.com 从本机时通时断，一次超时不代表本轮作废。
+    # 认证类失败（no auth / 401 / 403 / no key）重试无意义，立即放弃。
+    RETRY_DELAYS = (10, 25)          # 首次失败后隔 10s、25s 各再试一次（共 3 次）
+
+    def _fetch_with_retry(self, name: str, fetch, log):
+        sn = {"ok": False}
+        for attempt, delay in enumerate((0, *self.RETRY_DELAYS)):
+            if delay:
+                time.sleep(delay)
+            try:
+                sn = fetch()
+            except Exception as e:
+                sn = {"ok": False, "raw_status": type(e).__name__}
+            if sn.get("ok"):
+                if attempt:
+                    log(f"{name}: 第 {attempt + 1} 次尝试成功")
+                return sn
+            status = str(sn.get("raw_status") or sn.get("status") or "?")
+            if attempt < len(self.RETRY_DELAYS) and not any(
+                    k in status for k in ("auth", "401", "403", "no key")):
+                log(f"{name}: 第 {attempt + 1} 次失败（{status}），{self.RETRY_DELAYS[attempt]}s 后重试")
+            else:
+                break
+        return sn
+
     # 一次完整周期：抓两边 → 各自成功才渲染推送（失败侧保留屏上旧图）
     def cycle(self, log) -> dict:
         ts = datetime.now().strftime("%H:%M")
         result = {"ts": ts}
         for name, key, fetch, render, key_field, png_name in self.tasks():
             try:
-                sn = fetch()
+                sn = self._fetch_with_retry(name, fetch, log)
                 if not sn.get("ok"):
                     log(f"{ts} {name}: 拉取失败 ({sn.get('raw_status', sn.get('status', '?'))})，保留屏上旧图")
                     result[key] = {"ok": False}
