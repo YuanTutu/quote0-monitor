@@ -116,6 +116,8 @@ def _footer_left(sn: dict) -> str:
 
 
 def _status_label(sn: dict) -> str:
+    if sn.get("_cached"):
+        return "NET ERR"     # 网络停更：屏上数字是最后一次成功获取的快照
     if not sn.get("ok"):
         return "ERROR"
     return sn.get("status", "unknown").upper()
@@ -182,9 +184,7 @@ def render_image(snapshot: dict) -> bytes:
     # ── 页脚：详情（左） + 状态（右） ───────────────────────────────────
     _divider(draw, DIVIDER_BOTTOM)
     left = _footer_left(sn) if sn.get("ok") else ""
-    if snapshot.get("_cached"):
-        left = ("stale  " + left).strip()
-    status = _status_label(sn)
+    status = _status_label(sn)           # 停更态徽标 NET ERR（数字=快照）
     sw, _ = _tsize(draw, status, small)
     max_left_w = W - 2 * PAD - sw - 8
     while left and _tsize(draw, left, small)[0] > max_left_w:

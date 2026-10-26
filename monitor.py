@@ -38,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 # 打包成 exe（PyInstaller --onefile）后，__file__ 指向临时解压目录且每次
 # 变化——配置/日志/预览必须落在 exe 自己的目录；渲染器则从打包内部加载。
@@ -136,6 +136,39 @@ class Dashboard:
         self.key = cfg["quote0_api_key"]
         self.tmp = HERE / "tmp"
         self.tmp.mkdir(exist_ok=True)
+        # 断网停更支持：每侧保留最后一次成功快照（落盘，重启不丢），
+        # 连续失败进入指数退避（5→10→20→40→60 分钟封顶，可配置）
+        self.last_good = self._load_last_good()
+        self.stale = {k: {"fails": 0, "next_try": 0.0, "pushed": False}
+                      for k in ("gpt", "glm")}
+        self.force_next = False
+
+    LAST_GOOD_PATH = "last_good.json"
+
+    def _load_last_good(self) -> dict:
+        try:
+            return json.loads((self.tmp / self.LAST_GOOD_PATH).read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_last_good(self):
+        try:
+            (self.tmp / self.LAST_GOOD_PATH).write_text(
+                json.dumps(self.last_good), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _interval_secs(self) -> int:
+        return max(30, int(self.cfg.get("interval_minutes", 5) * 60))
+
+    def _backoff_secs(self, key: str) -> int:
+        """fails=1 时退避 0（下个常规周期照常再试，即序列里的"5 分钟"档）；
+        此后 10→20→40→80…分钟，封顶 stale_max_backoff_minutes（默认 60）。"""
+        fails = self.stale[key]["fails"]
+        if fails < 2:
+            return 0
+        cap = int(self.cfg.get("stale_max_backoff_minutes", 60)) * 60
+        return min(self._interval_secs() * 2 ** (fails - 1), cap)
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.key}"}
@@ -185,11 +218,13 @@ class Dashboard:
     def render_gpt(self, sn: dict, ts: str) -> bytes:
         snap = {"layout": "auto", "updated_at": ts, "codex": sn,
                 "claude": {"ok": False}, "agy": {"ok": False},
-                "deepseek": {"ok": False}, "opencode": {"ok": False}}
+                "deepseek": {"ok": False}, "opencode": {"ok": False},
+                "_cached": bool(sn.get("_cached"))}
         return self.mods["render_gpt"].render_image(snap)
 
     def render_glm(self, sn: dict, ts: str) -> bytes:
-        return self.mods["render_glm"].render_image({"glm": sn, "updated_at": ts})
+        return self.mods["render_glm"].render_image(
+            {"glm": sn, "updated_at": ts, "_cached": bool(sn.get("_cached"))})
 
     def push_card(self, png: bytes, task_key: str) -> dict:
         r = requests.post(
@@ -235,27 +270,58 @@ class Dashboard:
                 break
         return sn
 
-    # 一次完整周期：抓两边 → 各自成功才渲染推送（失败侧保留屏上旧图）
+    # 一次完整周期：抓取（快速重试）→ 成功则推送最新；持续失败进入停更态——
+    # 屏上保留最后一次成功的数字（时间冻结 + NET ERR 徽标），指数退避重试。
     def cycle(self, log) -> dict:
         ts = datetime.now().strftime("%H:%M")
         result = {"ts": ts}
+        forced = self.force_next
         for name, key, fetch, render, key_field, png_name in self.tasks():
+            st = self.stale[key]
             try:
+                if st["fails"] and not forced and time.time() < st["next_try"]:
+                    continue          # 退避冷却中：不抓不推（停更帧已推过一次）
                 sn = self._fetch_with_retry(name, fetch, log)
-                if not sn.get("ok"):
-                    log(f"{ts} {name}: 拉取失败 ({sn.get('raw_status', sn.get('status', '?'))})，保留屏上旧图")
-                    result[key] = {"ok": False}
-                    continue
-                png = render(sn, ts)
-                (self.tmp / png_name).write_bytes(png)
-                push = self.push_card(png, self.cfg[key_field])
-                if push["ok"]:
-                    log(f"{ts} {name}: 已推送  {self._summary(name, sn)}")
-                    result[key] = {"ok": True, "sn": sn, "ts": ts}
+                status = str(sn.get("raw_status") or sn.get("status") or "?")
+                if sn.get("ok"):
+                    st.update(fails=0, next_try=0.0, pushed=False)
+                    self.last_good[key] = {"sn": sn, "ts": ts}
+                    self._save_last_good()
+                    png = render(sn, ts)
+                    (self.tmp / png_name).write_bytes(png)
+                    push = self.push_card(png, self.cfg[key_field])
+                    if push["ok"]:
+                        log(f"{ts} {name}: 已推送  {self._summary(name, sn)}")
+                        result[key] = {"ok": True, "sn": sn, "ts": ts}
+                    else:
+                        log(f"{ts} {name}: 推送失败 HTTP {push['status']} {push['message']}")
                 else:
-                    log(f"{ts} {name}: 推送失败 HTTP {push['status']} {push['message']}")
+                    st["fails"] += 1
+                    st["next_try"] = time.time() + self._backoff_secs(key)
+                    lg = self.last_good.get(key)
+                    if lg and not st["pushed"]:
+                        cached_sn = dict(lg["sn"])
+                        cached_sn["_cached"] = True
+                        png = render(cached_sn, lg["ts"])
+                        (self.tmp / png_name).write_bytes(png)
+                        if self.push_card(png, self.cfg[key_field])["ok"]:
+                            st["pushed"] = True
+                            log(f"{ts} {name}: 网络失败（{status}），屏上保留 {lg['ts']} "
+                                f"的数据并标记 NET ERR，稍后自动重试")
+                            result[key] = {"ok": False, "stale": True,
+                                           "sn": cached_sn, "ts": lg["ts"]}
+                    else:
+                        wait = int((st['next_try'] - time.time()) / 60)
+                        log(f"{ts} {name}: 拉取失败（{status}），"
+                            + (f"停更帧保持，" if st["pushed"] else "无历史快照，保留屏上旧图，")
+                            + f"下次尝试约 {max(wait, 0)} 分钟后")
+                        result[key] = {"ok": False,
+                                       "stale": bool(st["pushed"]),
+                                       "sn": (lg or {}).get("sn", {}),
+                                       "ts": (lg or {}).get("ts", "?")}
             except Exception as e:
                 log(f"{ts} {name}: 异常 {type(e).__name__}: {e}")
+        self.force_next = False
         return result
 
     @staticmethod
@@ -289,6 +355,7 @@ class Engine:
         self.thread.start()
 
     def refresh_now(self):
+        self.dash.force_next = True      # 手动刷新无视退避冷却立即重试
         self._wake.set()
 
     def set_interval(self, minutes: int):
@@ -598,9 +665,15 @@ def make_config_window(root, cfg: dict, log):
 
 # ── Tkinter 预览窗口 ─────────────────────────────────────────────────────────
 
-def _fmt(name: str, sn: dict) -> str:
-    if not sn or not sn.get("ok"):
+def _fmt(name: str, entry: dict | None) -> str:
+    if not entry:
         return "拉取失败/未配置"
+    head = None
+    if entry.get("stale"):
+        head = f"⚠ 网络错误，显示 {entry.get('ts', '?')} 的快照"
+    elif not entry.get("ok"):
+        return "拉取失败/未配置"
+    sn = entry.get("sn") or {}
     lines = []
     if sn.get("short_used_percent") is not None:
         lines.append(f"{sn.get('short_label', '5h'):4s} 已用 {sn['short_used_percent']}%   重置 {sn.get('short_reset', '?')}")
@@ -612,7 +685,7 @@ def _fmt(name: str, sn: dict) -> str:
         mcp = sn.get("mcp")
         if mcp:
             lines.append(f"MCP 剩余 {mcp.get('remaining')}/{mcp.get('total')}  重置 {mcp.get('reset')}")
-    return "\n".join(lines)
+    return (head + "\n" if head else "") + "\n".join(lines)
 
 
 def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
@@ -689,7 +762,8 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
             if png.exists():
                 _show_image(img_label, png)
             sn = (result or {}).get(key) or {}
-            info.config(text=_fmt("ChatGPT" if key == "gpt" else "GLM", sn.get("sn", sn)))
+            info.config(text=_fmt("ChatGPT" if key == "gpt" else "GLM",
+                                  (result or {}).get(key)))
 
     engine.on_cycle = on_cycle
 
