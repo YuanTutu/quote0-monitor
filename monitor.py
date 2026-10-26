@@ -38,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 # 打包成 exe（PyInstaller --onefile）后，__file__ 指向临时解压目录且每次
 # 变化——配置/日志/预览必须落在 exe 自己的目录；渲染器则从打包内部加载。
@@ -248,6 +248,11 @@ class Dashboard:
     # 网络抖动重试：chatgpt.com 从本机时通时断，一次超时不代表本轮作废。
     # 认证类失败（no auth / 401 / 403 / no key）重试无意义，立即放弃。
     RETRY_DELAYS = (10, 25)          # 首次失败后隔 10s、25s 各再试一次（共 3 次）
+    AUTH_MARKS = ("auth", "401", "403", "no key")
+
+    @classmethod
+    def _auth_failure(cls, status: str) -> bool:
+        return any(k in status for k in cls.AUTH_MARKS)
 
     def _fetch_with_retry(self, name: str, fetch, log):
         sn = {"ok": False}
@@ -263,8 +268,7 @@ class Dashboard:
                     log(f"{name}: 第 {attempt + 1} 次尝试成功")
                 return sn
             status = str(sn.get("raw_status") or sn.get("status") or "?")
-            if attempt < len(self.RETRY_DELAYS) and not any(
-                    k in status for k in ("auth", "401", "403", "no key")):
+            if attempt < len(self.RETRY_DELAYS) and not self._auth_failure(status):
                 log(f"{name}: 第 {attempt + 1} 次失败（{status}），{self.RETRY_DELAYS[attempt]}s 后重试")
             else:
                 break
@@ -298,17 +302,20 @@ class Dashboard:
                 else:
                     st["fails"] += 1
                     st["next_try"] = time.time() + self._backoff_secs(key)
+                    err_kind = "auth" if self._auth_failure(status) else "net"
+                    badge = "AUTH ERR" if err_kind == "auth" else "NET ERR"
                     lg = self.last_good.get(key)
                     if lg and not st["pushed"]:
                         cached_sn = dict(lg["sn"])
                         cached_sn["_cached"] = True
+                        cached_sn["err_kind"] = err_kind
                         png = render(cached_sn, lg["ts"])
                         (self.tmp / png_name).write_bytes(png)
                         if self.push_card(png, self.cfg[key_field])["ok"]:
                             st["pushed"] = True
-                            log(f"{ts} {name}: 网络失败（{status}），屏上保留 {lg['ts']} "
-                                f"的数据并标记 NET ERR，稍后自动重试")
-                            result[key] = {"ok": False, "stale": True,
+                            log(f"{ts} {name}: 抓取失败（{status}），屏上保留 {lg['ts']} "
+                                f"的数据并标记 {badge}，稍后自动重试")
+                            result[key] = {"ok": False, "stale": True, "err_kind": err_kind,
                                            "sn": cached_sn, "ts": lg["ts"]}
                     else:
                         wait = int((st['next_try'] - time.time()) / 60)
@@ -317,6 +324,7 @@ class Dashboard:
                             + f"下次尝试约 {max(wait, 0)} 分钟后")
                         result[key] = {"ok": False,
                                        "stale": bool(st["pushed"]),
+                                       "err_kind": err_kind,
                                        "sn": (lg or {}).get("sn", {}),
                                        "ts": (lg or {}).get("ts", "?")}
             except Exception as e:
@@ -670,7 +678,8 @@ def _fmt(name: str, entry: dict | None) -> str:
         return "拉取失败/未配置"
     head = None
     if entry.get("stale"):
-        head = f"⚠ 网络错误，显示 {entry.get('ts', '?')} 的快照"
+        why = "密钥/登录失效" if entry.get("err_kind") == "auth" else "网络错误"
+        head = f"⚠ {why}，显示 {entry.get('ts', '?')} 的快照"
     elif not entry.get("ok"):
         return "拉取失败/未配置"
     sn = entry.get("sn") or {}

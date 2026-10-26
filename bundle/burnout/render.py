@@ -167,7 +167,8 @@ def _draw_chatgpt_solo(draw: ImageDraw.ImageDraw, snap: dict):
     # the window exhausts (no manual action) — not actionable on-screen, dropped.
     left = "  ".join(bits)
     if snap.get("_cached"):
-        status = "NET ERR"   # 网络停更：屏上数字是最后一次成功获取的快照
+        # 停更态：数字是最后一次成功的快照；徽标按失败原因区分
+        status = "AUTH ERR" if sn.get("err_kind") == "auth" else "NET ERR"
     else:
         status = (sn.get("status") or "unknown").upper() if sn.get("ok") else "ERROR"
     sw, _ = _tsize(draw, status, small)

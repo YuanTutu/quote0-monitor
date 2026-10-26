@@ -117,7 +117,8 @@ def _footer_left(sn: dict) -> str:
 
 def _status_label(sn: dict) -> str:
     if sn.get("_cached"):
-        return "NET ERR"     # 网络停更：屏上数字是最后一次成功获取的快照
+        # 停更态：屏上数字是最后一次成功获取的快照；徽标按失败原因区分
+        return "AUTH ERR" if sn.get("err_kind") == "auth" else "NET ERR"
     if not sn.get("ok"):
         return "ERROR"
     return sn.get("status", "unknown").upper()
