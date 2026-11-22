@@ -38,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-__version__ = "1.10.2"
+__version__ = "1.10.3"
 
 # 打包成 exe（PyInstaller --onefile）后，__file__ 指向临时解压目录且每次
 # 变化——配置/日志/预览必须落在 exe 自己的目录；渲染器则从打包内部加载。
@@ -229,17 +229,26 @@ class Dashboard:
             {"glm": sn, "updated_at": ts, "_cached": bool(sn.get("_cached"))})
 
     def push_card(self, png: bytes, task_key: str) -> dict:
-        r = requests.post(
-            f"{API_BASE}/api/authV2/open/device/{self.dev}/image",
-            headers=self._headers(),
-            json={
-                "taskType": "loop",
-                "taskKey": task_key,
-                "refreshNow": True,          # 循环卡片推送后立即刷新
-                "image": base64.b64encode(png).decode(),
-                "ditherType": "NONE",        # 图已是纯 1-bit，关服务端抖动防重影
-                "border": 0,
-            }, timeout=20)
+        """推图；遇 429 限频（双卡同秒碰撞或服务端瞬时限流，实测持续数分钟
+        后自行恢复）按服务端提示等 2 秒重试，并降级 refreshNow=false——
+        只入队不等即刷，设备休眠/离线时照样接受，下次内容切换时显示。"""
+        def _post(refresh_now: bool):
+            return requests.post(
+                f"{API_BASE}/api/authV2/open/device/{self.dev}/image",
+                headers=self._headers(),
+                json={
+                    "taskType": "loop",
+                    "taskKey": task_key,
+                    "refreshNow": refresh_now,   # 循环卡片推送后立即刷新
+                    "image": base64.b64encode(png).decode(),
+                    "ditherType": "NONE",        # 图已是纯 1-bit，关服务端抖动防重影
+                    "border": 0,
+                }, timeout=20)
+
+        r = _post(True)
+        if r.status_code == 429:
+            time.sleep(2)
+            r = _post(False)                 # 降级：只入队，放弃即刷要求
         try:
             body = r.json()
         except ValueError:
@@ -299,6 +308,8 @@ class Dashboard:
                     if push["ok"]:
                         log(f"{ts} {name}: 已推送  {self._summary(name, sn)}")
                         result[key] = {"ok": True, "sn": sn, "ts": ts}
+                        if key == "gpt":
+                            time.sleep(1.5)  # 双卡推送拉开 1.5s，避开设备秒级限频
                     else:
                         log(f"{ts} {name}: 推送失败 HTTP {push['status']} {push['message']}")
                 else:

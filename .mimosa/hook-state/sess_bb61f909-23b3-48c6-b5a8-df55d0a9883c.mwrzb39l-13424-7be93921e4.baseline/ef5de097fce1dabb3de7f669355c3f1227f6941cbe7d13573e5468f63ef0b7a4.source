@@ -38,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-__version__ = "1.10.1"
+__version__ = "1.10.2"
 
 # 打包成 exe（PyInstaller --onefile）后，__file__ 指向临时解压目录且每次
 # 变化——配置/日志/预览必须落在 exe 自己的目录；渲染器则从打包内部加载。
@@ -50,14 +50,16 @@ LOCK_PORT = 47631          # 单实例锁：防止“开机自启的静默实例
 INTERVAL_CHOICES = [1, 2, 3, 5, 10, 15, 30, 60]
 
 CONFIG_TEMPLATE = {
+    # 凭证字段留空：首次运行会自动弹出配置窗口引导填写（模板不再放
+    # 长得像密钥的占位串）；字段含义见程序内「使用说明」与 README
     "interval_minutes": 5,
     "enable_gpt": True,
     "enable_glm": True,
-    "quote0_api_key": "在这里填 Dot. App 创建的 dot_app_... 推送密钥",
-    "quote0_device_id": "在这里填设备序列号",
-    "card_gpt": "ChatGPT 卡片的 taskKey（App 内容工坊加 Image API 卡后可查）",
-    "card_glm": "GLM 卡片的 taskKey",
-    "glm_api_key": "在这里填智谱开放平台 API Key",
+    "quote0_api_key": "",
+    "quote0_device_id": "",
+    "card_gpt": "",
+    "card_glm": "",
+    "glm_api_key": "",
     "glm_plan": "cn",
 }
 
@@ -704,6 +706,7 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
     from PIL import Image, ImageTk
 
     SCALE = 1.2
+    IMG_W, IMG_H = int(296 * SCALE), int(152 * SCALE)   # 预览图固定像素位
     root = tk.Tk()
     root.title(f"Quote/0 用量监控 v{__version__}")
     log_file = dash.tmp / "monitor.log"
@@ -749,19 +752,39 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
             img_label = tk.Label(panel)
             img_label.pack(padx=6, pady=6)
             info = tk.Label(panel, text="等待首次刷新…", justify="left",
-                            font=("Consolas", 10), anchor="w")
+                            font=("Consolas", 10), anchor="w",
+                            wraplength=IMG_W - 12)   # 限宽：面板宽=图片宽，永不水平裁切
             info.pack(fill="x", padx=6, pady=(0, 6))
             state["panels"][key] = (img_label, info, png_name)
             png = dash.tmp / png_name
             if png.exists():
                 _show_image(state["panels"][key][0], png)
+            else:
+                _placeholder(img_label)
 
     def _show_image(label, png: Path):
         img = Image.open(png)
-        img = img.resize((int(img.width * SCALE), int(img.height * SCALE)), Image.NEAREST)
+        img = img.resize((IMG_W, IMG_H), Image.NEAREST)
         photo = ImageTk.PhotoImage(img)
         state["photo"][png.name] = photo          # 保持引用防 GC
         label.config(image=photo)
+
+    def _placeholder(label):
+        """未收到图时占住固定像素位——窗口尺寸从第一刻起就稳定，不再裁切。"""
+        blank = tk.PhotoImage(width=IMG_W, height=IMG_H)
+        state["photo"][f"blank_{id(label)}"] = blank
+        label.config(image=blank)
+
+    def fit_window():
+        """按当前内容需求定窗口尺寸并锁定拖拽。Tk 只在首次映射时自动定
+        尺寸，之后子控件变宽（预览图 355px、info 文本）不会带动窗口——
+        右侧面板被裁掉（用户此前需手动拖宽）。显式 fit 根治；info 用
+        wraplength 限宽保证宽度恒定，高度随停更横幅等增行自动调整。"""
+        root.update_idletasks()
+        need = (root.winfo_reqwidth(), root.winfo_reqheight())
+        if (root.winfo_width(), root.winfo_height()) != need:
+            root.geometry(f"{need[0]}x{need[1]}")
+        root.resizable(False, False)
 
     def on_cycle(result):
         if not root.winfo_exists():
@@ -773,6 +796,8 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
             sn = (result or {}).get(key) or {}
             info.config(text=_fmt("ChatGPT" if key == "gpt" else "GLM",
                                   (result or {}).get(key)))
+        if root.winfo_ismapped():
+            fit_window()
 
     engine.on_cycle = on_cycle
 
@@ -834,6 +859,7 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
             cfg[field] = not cfg.get(field, True)
             save_config(cfg)
             build_panels()
+            fit_window()
             log(f"{name} 已{'启用' if cfg[field] else '停用'}（已写入 config.json）")
         return _toggle
 
@@ -863,6 +889,8 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
     def show_window():
         root.deiconify()
         root.lift()
+        root.update_idletasks()
+        fit_window()      # 隐藏期间内容可能增行（停更横幅等），显示时立即校正
 
     def hide_window():
         root.withdraw()
@@ -906,6 +934,7 @@ def run_ui(dash: Dashboard, cfg: dict, start_hidden: bool = False,
         root.withdraw()
 
     build_panels()
+    fit_window()
     engine.start()
     tick()
     if auto_open_config:
@@ -964,6 +993,16 @@ def acquire_lock() -> bool:
         return False
 
 
+def lock_held() -> bool:
+    """非占用式探测：常驻实例是否在运行（--once 自检的 429 预警用）。"""
+    s = socket.socket()
+    try:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", LOCK_PORT)) == 0
+    finally:
+        s.close()
+
+
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -988,6 +1027,8 @@ def main():
     dash = Dashboard(cfg, mods)
 
     if args.once:
+        if lock_held():
+            print("警告：已有常驻实例在运行——同时推送可能撞设备 429 限频，结果仅供参考。")
         if fresh:
             print(f"首次运行：已在 {HERE} 生成 config.json 模板。"
                   "请运行 python monitor.py（或双击 exe），在配置窗口里填写后自动保存。")

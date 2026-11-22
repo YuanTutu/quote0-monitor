@@ -11,11 +11,11 @@ import requests
 from .core import pct_status as _pct_status, time_until as _time_until
 
 CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
-CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-# The manual rate-limit reset credits are a separate endpoint: /usage only
-# carries the count (rate_limit_reset_credits.available_count), while the
-# credit's own expiry (e.g. 'Expires 10/4 10:13 AM') lives in credits[].
-CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+# Endpoints are fixed literals inlined at the call sites below (no dynamic
+# URL construction → no SSRF surface). The manual rate-limit reset credits
+# are a separate endpoint: /usage only carries the count
+# (rate_limit_reset_credits.available_count), while the credit's own expiry
+# (e.g. 'Expires 10/4 10:13 AM') lives in credits[].
 def _load_codex_token():
     """Return (access_token, account_id). Env var takes priority over auth.json."""
     env_token = os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
@@ -48,7 +48,9 @@ def _codex_headers():
 def get_codex_usage():
     """Fetch OpenAI Codex usage via direct API (no codexbar dependency)."""
     try:
-        r = requests.get(CODEX_USAGE_URL, headers=_codex_headers(), timeout=15)
+        r = requests.get(
+            "https://chatgpt.com/backend-api/wham/usage",
+            headers=_codex_headers(), timeout=15)
         r.raise_for_status()
         return {"ok": True, "raw": r.json()}
 
@@ -72,7 +74,9 @@ def get_codex_reset_credits():
 
     Same auth/error shape as get_codex_usage."""
     try:
-        r = requests.get(CODEX_RESET_CREDITS_URL, headers=_codex_headers(), timeout=15)
+        r = requests.get(
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+            headers=_codex_headers(), timeout=15)
         r.raise_for_status()
         return {"ok": True, "raw": r.json()}
 
